@@ -4,11 +4,11 @@
  */
 // Requirements
 const path          = require('path')
-const { Type }      = require('helios-distribution-types')
 
 const AuthManager   = require('./assets/js/authmanager')
 const ConfigManager = require('./assets/js/configmanager')
-const { DistroAPI } = require('./assets/js/distromanager')
+const DistroManager = require('./assets/js/distromanager')
+const Lang          = require('./assets/js/langloader')
 
 let rscShouldLoad = false
 let fatalStartupError = false
@@ -40,10 +40,10 @@ let currentView
  */
 function switchView(current, next, currentFadeTime = 500, nextFadeTime = 500, onCurrentFade = () => {}, onNextFade = () => {}){
     currentView = next
-    $(`${current}`).fadeOut(currentFadeTime, async () => {
-        await onCurrentFade()
-        $(`${next}`).fadeIn(nextFadeTime, async () => {
-            await onNextFade()
+    $(`${current}`).fadeOut(currentFadeTime, () => {
+        onCurrentFade()
+        $(`${next}`).fadeIn(nextFadeTime, () => {
+            onNextFade()
         })
     })
 }
@@ -57,15 +57,15 @@ function getCurrentView(){
     return currentView
 }
 
-async function showMainUI(data){
+function showMainUI(data){
 
     if(!isDev){
         loggerAutoUpdater.info('Initializing..')
         ipcRenderer.send('autoUpdateAction', 'initAutoUpdater', ConfigManager.getAllowPrerelease())
     }
 
-    await prepareSettings(true)
-    updateSelectedServer(data.getServerById(ConfigManager.getSelectedServer()))
+    prepareSettings(true)
+    updateSelectedServer(data.getServer(ConfigManager.getSelectedServer()))
     refreshServerStatus()
     setTimeout(() => {
         document.getElementById('frameBar').style.backgroundColor = 'rgba(0, 0, 0, 0.5)'
@@ -114,9 +114,9 @@ function showFatalStartupError(){
         $('#loadingContainer').fadeOut(250, () => {
             document.getElementById('overlayContainer').style.background = 'none'
             setOverlayContent(
-                Lang.queryJS('uibinder.startup.fatalErrorTitle'),
-                Lang.queryJS('uibinder.startup.fatalErrorMessage'),
-                Lang.queryJS('uibinder.startup.closeButton')
+                'Fatal Error: Unable to Load Distribution Index',
+                'A connection could not be established to our servers to download the distribution index. No local copies were available to load. <br><br>The distribution index is an essential file which provides the latest server information. The launcher is unable to start without it. Ensure you are connected to the internet and relaunch the application.',
+                'Close'
             )
             setOverlayHandler(() => {
                 const window = remote.getCurrentWindow()
@@ -133,7 +133,7 @@ function showFatalStartupError(){
  * @param {Object} data The distro index object.
  */
 function onDistroRefresh(data){
-    updateSelectedServer(data.getServerById(ConfigManager.getSelectedServer()))
+    updateSelectedServer(data.getServer(ConfigManager.getSelectedServer()))
     refreshServerStatus()
     initNews()
     syncModConfigurations(data)
@@ -149,10 +149,10 @@ function syncModConfigurations(data){
 
     const syncedCfgs = []
 
-    for(let serv of data.servers){
+    for(let serv of data.getServers()){
 
-        const id = serv.rawServer.id
-        const mdls = serv.modules
+        const id = serv.getID()
+        const mdls = serv.getModules()
         const cfg = ConfigManager.getModConfiguration(id)
 
         if(cfg != null){
@@ -161,20 +161,20 @@ function syncModConfigurations(data){
             const mods = {}
 
             for(let mdl of mdls){
-                const type = mdl.rawModule.type
+                const type = mdl.getType()
 
-                if(type === Type.ForgeMod || type === Type.LiteMod || type === Type.LiteLoader || type === Type.FabricMod){
-                    if(!mdl.getRequired().value){
-                        const mdlID = mdl.getVersionlessMavenIdentifier()
+                if(type === DistroManager.Types.ForgeMod || type === DistroManager.Types.LiteMod || type === DistroManager.Types.LiteLoader){
+                    if(!mdl.getRequired().isRequired()){
+                        const mdlID = mdl.getVersionlessID()
                         if(modsOld[mdlID] == null){
-                            mods[mdlID] = scanOptionalSubModules(mdl.subModules, mdl)
+                            mods[mdlID] = scanOptionalSubModules(mdl.getSubModules(), mdl)
                         } else {
-                            mods[mdlID] = mergeModConfiguration(modsOld[mdlID], scanOptionalSubModules(mdl.subModules, mdl), false)
+                            mods[mdlID] = mergeModConfiguration(modsOld[mdlID], scanOptionalSubModules(mdl.getSubModules(), mdl), false)
                         }
                     } else {
-                        if(mdl.subModules.length > 0){
-                            const mdlID = mdl.getVersionlessMavenIdentifier()
-                            const v = scanOptionalSubModules(mdl.subModules, mdl)
+                        if(mdl.hasSubModules()){
+                            const mdlID = mdl.getVersionlessID()
+                            const v = scanOptionalSubModules(mdl.getSubModules(), mdl)
                             if(typeof v === 'object'){
                                 if(modsOld[mdlID] == null){
                                     mods[mdlID] = v
@@ -197,15 +197,15 @@ function syncModConfigurations(data){
             const mods = {}
 
             for(let mdl of mdls){
-                const type = mdl.rawModule.type
-                if(type === Type.ForgeMod || type === Type.LiteMod || type === Type.LiteLoader || type === Type.FabricMod){
-                    if(!mdl.getRequired().value){
-                        mods[mdl.getVersionlessMavenIdentifier()] = scanOptionalSubModules(mdl.subModules, mdl)
+                const type = mdl.getType()
+                if(type === DistroManager.Types.ForgeMod || type === DistroManager.Types.LiteMod || type === DistroManager.Types.LiteLoader){
+                    if(!mdl.getRequired().isRequired()){
+                        mods[mdl.getVersionlessID()] = scanOptionalSubModules(mdl.getSubModules(), mdl)
                     } else {
-                        if(mdl.subModules.length > 0){
-                            const v = scanOptionalSubModules(mdl.subModules, mdl)
+                        if(mdl.hasSubModules()){
+                            const v = scanOptionalSubModules(mdl.getSubModules(), mdl)
                             if(typeof v === 'object'){
-                                mods[mdl.getVersionlessMavenIdentifier()] = v
+                                mods[mdl.getVersionlessID()] = v
                             }
                         }
                     }
@@ -232,8 +232,8 @@ function syncModConfigurations(data){
 function ensureJavaSettings(data) {
 
     // Nothing too fancy for now.
-    for(const serv of data.servers){
-        ConfigManager.ensureJavaConfig(serv.rawServer.id, serv.effectiveJavaOptions, serv.rawServer.javaOptions?.ram)
+    for(const serv of data.getServers()){
+        ConfigManager.ensureJavaConfig(serv.getID(), serv.getMinecraftVersion())
     }
 
     ConfigManager.save()
@@ -251,17 +251,17 @@ function scanOptionalSubModules(mdls, origin){
         const mods = {}
 
         for(let mdl of mdls){
-            const type = mdl.rawModule.type
+            const type = mdl.getType()
             // Optional types.
-            if(type === Type.ForgeMod || type === Type.LiteMod || type === Type.LiteLoader || type === Type.FabricMod){
+            if(type === DistroManager.Types.ForgeMod || type === DistroManager.Types.LiteMod || type === DistroManager.Types.LiteLoader){
                 // It is optional.
-                if(!mdl.getRequired().value){
-                    mods[mdl.getVersionlessMavenIdentifier()] = scanOptionalSubModules(mdl.subModules, mdl)
+                if(!mdl.getRequired().isRequired()){
+                    mods[mdl.getVersionlessID()] = scanOptionalSubModules(mdl.getSubModules(), mdl)
                 } else {
                     if(mdl.hasSubModules()){
-                        const v = scanOptionalSubModules(mdl.subModules, mdl)
+                        const v = scanOptionalSubModules(mdl.getSubModules(), mdl)
                         if(typeof v === 'object'){
-                            mods[mdl.getVersionlessMavenIdentifier()] = v
+                            mods[mdl.getVersionlessID()] = v
                         }
                     }
                 }
@@ -272,13 +272,13 @@ function scanOptionalSubModules(mdls, origin){
             const ret = {
                 mods
             }
-            if(!origin.getRequired().value){
-                ret.value = origin.getRequired().def
+            if(!origin.getRequired().isRequired()){
+                ret.value = origin.getRequired().isDefault()
             }
             return ret
         }
     }
-    return origin.getRequired().def
+    return origin.getRequired().isDefault()
 }
 
 /**
@@ -323,6 +323,18 @@ function mergeModConfiguration(o, n, nReq = false){
     return n
 }
 
+function refreshDistributionIndex(remote, onSuccess, onError){
+    if(remote){
+        DistroManager.pullRemote()
+            .then(onSuccess)
+            .catch(onError)
+    } else {
+        DistroManager.pullLocal()
+            .then(onSuccess)
+            .catch(onError)
+    }
+}
+
 async function validateSelectedAccount(){
     const selectedAcc = ConfigManager.getSelectedAccount()
     if(selectedAcc != null){
@@ -332,12 +344,10 @@ async function validateSelectedAccount(){
             ConfigManager.save()
             const accLen = Object.keys(ConfigManager.getAuthAccounts()).length
             setOverlayContent(
-                Lang.queryJS('uibinder.validateAccount.failedMessageTitle'),
-                accLen > 0
-                    ? Lang.queryJS('uibinder.validateAccount.failedMessage', { 'account': selectedAcc.displayName })
-                    : Lang.queryJS('uibinder.validateAccount.failedMessageSelectAnotherAccount', { 'account': selectedAcc.displayName }),
-                Lang.queryJS('uibinder.validateAccount.loginButton'),
-                Lang.queryJS('uibinder.validateAccount.selectAnotherAccountButton')
+                'Failed to Refresh Login',
+                `We were unable to refresh the login for <strong>${selectedAcc.displayName}</strong>. Please ${accLen > 0 ? 'select another account or ' : ''} login again.`,
+                'Login',
+                'Select Another Account'
             )
             setOverlayHandler(() => {
 
@@ -419,14 +429,14 @@ function setSelectedAccount(uuid){
 }
 
 // Synchronous Listener
-document.addEventListener('readystatechange', async () => {
+document.addEventListener('readystatechange', function(){
 
     if (document.readyState === 'interactive' || document.readyState === 'complete'){
         if(rscShouldLoad){
             rscShouldLoad = false
             if(!fatalStartupError){
-                const data = await DistroAPI.getDistribution()
-                await showMainUI(data)
+                const data = DistroManager.getDistribution()
+                showMainUI(data)
             } else {
                 showFatalStartupError()
             }
@@ -436,13 +446,13 @@ document.addEventListener('readystatechange', async () => {
 }, false)
 
 // Actions that must be performed after the distribution index is downloaded.
-ipcRenderer.on('distributionIndexDone', async (event, res) => {
+ipcRenderer.on('distributionIndexDone', (event, res) => {
     if(res) {
-        const data = await DistroAPI.getDistribution()
+        const data = DistroManager.getDistribution()
         syncModConfigurations(data)
         ensureJavaSettings(data)
         if(document.readyState === 'interactive' || document.readyState === 'complete'){
-            await showMainUI(data)
+            showMainUI(data)
         } else {
             rscShouldLoad = true
         }
@@ -457,10 +467,11 @@ ipcRenderer.on('distributionIndexDone', async (event, res) => {
 })
 
 // Util for development
-async function devModeToggle() {
-    DistroAPI.toggleDevMode(true)
-    const data = await DistroAPI.refreshDistributionOrFallback()
-    ensureJavaSettings(data)
-    updateSelectedServer(data.servers[0])
-    syncModConfigurations(data)
+function devModeToggle() {
+    DistroManager.setDevMode(true)
+    DistroManager.pullLocal().then((data) => {
+        ensureJavaSettings(data)
+        updateSelectedServer(data.getServers()[0])
+        syncModConfigurations(data)
+    })
 }
